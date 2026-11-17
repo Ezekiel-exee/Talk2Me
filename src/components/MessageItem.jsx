@@ -91,8 +91,8 @@ export default function MessageItem({
   const touch = useRef(null);
   const color = colorFor(item.user_id);
 
-  // The picker lives in a portal above everything; close it on outside click,
-  // Escape, resize, or when the message list behind it scrolls.
+  // The picker lives in a portal above everything. While it is open the message list
+  // behind it can't scroll; it closes on outside click, Escape or resize.
   useEffect(() => {
     if (!pickerOpen) return undefined;
     const close = () => setPickerPos(null);
@@ -100,18 +100,20 @@ export default function MessageItem({
       if (pickerRef.current?.contains(e.target) || e.target.closest?.('[data-picker-trigger]')) return;
       close();
     };
-    const onScroll = (e) => {
-      if (!pickerRef.current?.contains(e.target)) close();
+    const blockScroll = (e) => {
+      if (!pickerRef.current?.contains(e.target)) e.preventDefault();
     };
     const esc = (e) => e.key === 'Escape' && close();
     document.addEventListener('mousedown', onMouseDown);
     document.addEventListener('keydown', esc);
-    document.addEventListener('scroll', onScroll, true);
+    document.addEventListener('wheel', blockScroll, { passive: false });
+    document.addEventListener('touchmove', blockScroll, { passive: false });
     window.addEventListener('resize', close);
     return () => {
       document.removeEventListener('mousedown', onMouseDown);
       document.removeEventListener('keydown', esc);
-      document.removeEventListener('scroll', onScroll, true);
+      document.removeEventListener('wheel', blockScroll);
+      document.removeEventListener('touchmove', blockScroll);
       window.removeEventListener('resize', close);
     };
   }, [pickerOpen]);
