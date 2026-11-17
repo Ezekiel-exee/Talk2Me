@@ -10,6 +10,7 @@ export default function ChatRoom({
   room,
   userId,
   username,
+  visible = true,
   systemMessages,
   memberCount,
   members,
@@ -80,7 +81,7 @@ export default function ChatRoom({
   useEffect(() => {
     const el = scrollRef.current;
     if (el && stickRef.current) el.scrollTop = el.scrollHeight;
-  }, [items]);
+  }, [items, visible]);
 
   const onScroll = () => {
     const el = scrollRef.current;

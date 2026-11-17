@@ -9,6 +9,7 @@ export default function LobbySidebar({
   loading,
   error,
   activeRoomId,
+  joinedIds = [],
   userId,
   username,
   open,
@@ -69,7 +70,8 @@ export default function LobbySidebar({
             )}
             {rooms.map((room) => {
               const count = occupancy[room.id] ?? 0;
-              const full = count >= room.max_users;
+              const joined = joinedIds.includes(room.id);
+              const full = count >= room.max_users && !joined;
               const active = room.id === activeRoomId;
               return (
                 <button
@@ -80,7 +82,15 @@ export default function LobbySidebar({
                     active ? 'bg-discord-input text-white' : 'text-discord-muted hover:bg-discord-hover hover:text-discord-text'
                   }`}
                 >
-                  <Hash size={18} className="shrink-0" />
+                  <span className="relative shrink-0">
+                    <Hash size={18} />
+                    {joined && (
+                      <span
+                        title="You're in this lobby"
+                        className="absolute -right-1 -top-1 h-2.5 w-2.5 rounded-full border-2 border-discord-sidebar bg-discord-green"
+                      />
+                    )}
+                  </span>
                   <span className="min-w-0 flex-1 truncate font-medium">{room.name}</span>
                   <Lock size={13} className="shrink-0" aria-label="Password protected" />
                   <span

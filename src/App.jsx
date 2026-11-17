@@ -4,11 +4,8 @@ import { isSupabaseConfigured, supabase } from './supabaseClient';
 import { useIdentity } from './hooks/useIdentity';
 import { useRooms } from './hooks/useRooms';
 import { useLobbyPresence } from './hooks/useLobbyPresence';
-import { useRoomPresence } from './hooks/useRoomPresence';
-import { useRoomHeartbeat } from './hooks/useRoomHeartbeat';
 import LobbySidebar from './components/LobbySidebar';
-import ChatRoom from './components/ChatRoom';
-import MemberSidebar from './components/MemberSidebar';
+import RoomView from './components/RoomView';
 import CreateRoomModal from './components/CreateRoomModal';
 import PasswordModal from './components/PasswordModal';
 import UsernameModal from './components/UsernameModal';
@@ -37,7 +34,8 @@ export default function App() {
   const rooms = allRooms.filter((r) => !r.archived_at);
   const archivedRooms = allRooms.filter((r) => r.archived_at);
 
-  const [activeRoom, setActiveRoom] = useState(null);
+  const [joinedRooms, setJoinedRooms] = useState([]);
+  const [activeRoomId, setActiveRoomId] = useState(null);
   const [pendingRoom, setPendingRoom] = useState(null);
   const [pendingRestore, setPendingRestore] = useState(false);
   const [showCreate, setShowCreate] = useState(false);
@@ -46,51 +44,65 @@ export default function App() {
   const [rightOpen, setRightOpen] = useState(false);
   const [notice, setNotice] = useState('');
   const verifiedRef = useRef(new Map());
-  const healingRef = useRef('');
+  const healingRef = useRef(new Set());
 
-  const occupancy = useLobbyPresence({ userId, username, roomId: activeRoom?.id });
-  useRoomHeartbeat(activeRoom?.id, userId);
+  const joinedIds = joinedRooms.map((r) => r.id);
+  const occupancy = useLobbyPresence({ userId, username, roomIds: joinedIds });
 
   const flash = useCallback((text) => {
     setNotice(text);
     setTimeout(() => setNotice((current) => (current === text ? '' : current)), 5000);
   }, []);
 
-  const handleRoomFull = useCallback(() => {
-    setActiveRoom(null);
-    flash('That lobby is full.');
-  }, [flash]);
+  const leaveRoom = useCallback((room) => {
+    setJoinedRooms((prev) => prev.filter((r) => r.id !== room.id));
+  }, []);
 
-  const { members, systemMessages } = useRoomPresence({
-    room: activeRoom,
-    userId,
-    username,
-    onRoomFull: handleRoomFull,
-  });
+  const handleRoomFull = useCallback(
+    (room) => {
+      leaveRoom(room);
+      flash(`"${room.name}" is full.`);
+    },
+    [leaveRoom, flash],
+  );
 
-  // Drop out of a room that was deleted server-side.
+  // Drop rooms that were deleted server-side.
   useEffect(() => {
-    if (!loading && activeRoom && !allRooms.some((r) => r.id === activeRoom.id)) setActiveRoom(null);
-  }, [allRooms, loading, activeRoom]);
+    if (loading) return;
+    setJoinedRooms((prev) => {
+      const next = prev.filter((r) => allRooms.some((a) => a.id === r.id));
+      return next.length === prev.length ? prev : next;
+    });
+  }, [allRooms, loading]);
 
-  // If the lobby got archived while we're still in it (e.g. a throttled background
+  useEffect(() => {
+    if (activeRoomId && !joinedRooms.some((r) => r.id === activeRoomId)) {
+      setActiveRoomId(joinedRooms[joinedRooms.length - 1]?.id ?? null);
+    }
+  }, [joinedRooms, activeRoomId]);
+
+  // If a lobby got archived while we're still in it (e.g. a throttled background
   // tab missed heartbeats), restore it using the password we already verified.
   useEffect(() => {
-    const current = activeRoom && allRooms.find((r) => r.id === activeRoom.id);
-    if (!current?.archived_at) {
-      healingRef.current = '';
-      return;
-    }
-    const password = verifiedRef.current.get(current.id);
-    if (!password || healingRef.current === current.id) return;
-    healingRef.current = current.id;
-    supabase.rpc('restore_room', { p_room_id: current.id, p_password: password }).then(() => {}, () => {});
-  }, [allRooms, activeRoom]);
+    joinedRooms.forEach((joined) => {
+      const current = allRooms.find((r) => r.id === joined.id);
+      if (!current?.archived_at) {
+        healingRef.current.delete(joined.id);
+        return;
+      }
+      const password = verifiedRef.current.get(joined.id);
+      if (!password || healingRef.current.has(joined.id)) return;
+      healingRef.current.add(joined.id);
+      supabase.rpc('restore_room', { p_room_id: joined.id, p_password: password }).then(() => {}, () => {});
+    });
+  }, [allRooms, joinedRooms]);
 
-  const isFull = (room) => (occupancy[room.id] ?? 0) >= room.max_users && room.id !== activeRoom?.id;
+  const isJoined = (room) => joinedIds.includes(room.id);
+  const isFull = (room) => !isJoined(room) && (occupancy[room.id] ?? 0) >= room.max_users;
 
   const enterRoom = (room) => {
-    setActiveRoom(room);
+    setJoinedRooms((prev) => (prev.some((r) => r.id === room.id) ? prev : [...prev, room]));
+    setActiveRoomId(room.id);
     setPendingRoom(null);
     setPendingRestore(false);
     setLeftOpen(false);
@@ -98,7 +110,7 @@ export default function App() {
   };
 
   const selectRoom = (room) => {
-    if (room.id === activeRoom?.id) return setLeftOpen(false);
+    if (isJoined(room)) return enterRoom(room);
     if (isFull(room)) return flash(`"${room.name}" is full (${room.max_users}/${room.max_users}).`);
     if (verifiedRef.current.has(room.id)) return enterRoom(room);
     setPendingRestore(false);
@@ -171,7 +183,8 @@ export default function App() {
         occupancy={occupancy}
         loading={loading}
         error={error}
-        activeRoomId={activeRoom?.id}
+        activeRoomId={activeRoomId}
+        joinedIds={joinedIds}
         userId={userId}
         username={username || '...'}
         open={leftOpen}
@@ -185,29 +198,23 @@ export default function App() {
         onEditName={() => setShowUsername(true)}
       />
 
-      {activeRoom ? (
-        <>
-          <ChatRoom
-            key={activeRoom.id}
-            room={activeRoom}
-            userId={userId}
-            username={username}
-            systemMessages={systemMessages}
-            memberCount={members.length}
-            members={members}
-            onLeave={() => setActiveRoom(null)}
-            onOpenLobbies={() => setLeftOpen(true)}
-            onOpenMembers={() => setRightOpen(true)}
-          />
-          <MemberSidebar
-            members={members}
-            limit={activeRoom.max_users}
-            userId={userId}
-            open={rightOpen}
-            onClose={() => setRightOpen(false)}
-          />
-        </>
-      ) : (
+      {joinedRooms.map((room) => (
+        <RoomView
+          key={room.id}
+          room={room}
+          visible={room.id === activeRoomId}
+          userId={userId}
+          username={username}
+          rightOpen={rightOpen}
+          onCloseMembers={() => setRightOpen(false)}
+          onLeave={leaveRoom}
+          onRoomFull={handleRoomFull}
+          onOpenLobbies={() => setLeftOpen(true)}
+          onOpenMembers={() => setRightOpen(true)}
+        />
+      ))}
+
+      {!activeRoomId && (
         <section className="flex min-w-0 flex-1 flex-col">
           <header className="flex h-12 items-center gap-2 border-b border-black/20 px-3 md:hidden">
             <button type="button" onClick={() => setLeftOpen(true)} aria-label="Open lobbies">
