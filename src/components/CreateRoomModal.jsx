@@ -1,7 +1,24 @@
 import { useState } from 'react';
+import { Globe, Link2 } from 'lucide-react';
 import Modal, { Field, inputClass, primaryBtn } from './Modal';
 
+const OPTIONS = [
+  {
+    value: false,
+    icon: Globe,
+    title: 'Public',
+    text: 'Listed for everyone. Joining needs the password.',
+  },
+  {
+    value: true,
+    icon: Link2,
+    title: 'Private',
+    text: 'Hidden and invite-only. Join through a link, no password.',
+  },
+];
+
 export default function CreateRoomModal({ onSubmit, onClose }) {
+  const [isPrivate, setIsPrivate] = useState(false);
   const [name, setName] = useState('');
   const [password, setPassword] = useState('');
   const [limit, setLimit] = useState(10);
@@ -9,14 +26,14 @@ export default function CreateRoomModal({ onSubmit, onClose }) {
   const [busy, setBusy] = useState(false);
 
   const limitValid = Number.isInteger(limit) && limit >= 2 && limit <= 50;
-  const valid = name.trim().length > 0 && password.length > 0 && limitValid;
+  const valid = name.trim().length > 0 && (isPrivate || password.length > 0) && limitValid;
 
   const submit = async (e) => {
     e.preventDefault();
     if (!valid) return;
     setBusy(true);
     setError('');
-    const message = await onSubmit({ name: name.trim(), password, maxUsers: limit });
+    const message = await onSubmit({ name: name.trim(), password, maxUsers: limit, isPrivate });
     if (message) {
       setError(message);
       setBusy(false);
@@ -24,8 +41,37 @@ export default function CreateRoomModal({ onSubmit, onClose }) {
   };
 
   return (
-    <Modal title="Create a Lobby" subtitle="Set a password and a member limit for your group chat." onClose={onClose}>
+    <Modal
+      title="Create a Lobby"
+      subtitle={isPrivate ? 'Share the invite link to let people in.' : 'Set a password and a member limit for your group chat.'}
+      onClose={onClose}
+    >
       <form onSubmit={submit}>
+        <div className="mb-4 grid grid-cols-2 gap-2" role="radiogroup" aria-label="Lobby visibility">
+          {OPTIONS.map(({ value, icon: Icon, title, text }) => {
+            const active = isPrivate === value;
+            return (
+              <button
+                key={title}
+                type="button"
+                role="radio"
+                aria-checked={active}
+                onClick={() => setIsPrivate(value)}
+                className={`rounded-lg border p-3 text-left transition ${
+                  active
+                    ? 'border-discord-blurple bg-discord-blurple/15'
+                    : 'border-transparent bg-discord-rail hover:border-white/10'
+                }`}
+              >
+                <div className="mb-1 flex items-center gap-2 font-semibold text-white">
+                  <Icon size={16} /> {title}
+                </div>
+                <p className="text-xs leading-snug text-discord-muted">{text}</p>
+              </button>
+            );
+          })}
+        </div>
+
         <Field label="Room name">
           <input
             autoFocus
@@ -36,15 +82,17 @@ export default function CreateRoomModal({ onSubmit, onClose }) {
             onChange={(e) => setName(e.target.value)}
           />
         </Field>
-        <Field label="Room password">
-          <input
-            type="password"
-            className={inputClass}
-            value={password}
-            maxLength={64}
-            onChange={(e) => setPassword(e.target.value)}
-          />
-        </Field>
+        {!isPrivate && (
+          <Field label="Room password">
+            <input
+              type="password"
+              className={inputClass}
+              value={password}
+              maxLength={64}
+              onChange={(e) => setPassword(e.target.value)}
+            />
+          </Field>
+        )}
         <Field label={`User limit (${limitValid ? limit : '2-50'})`} hint="Between 2 and 50 users">
           <div className="flex items-center gap-3">
             <input

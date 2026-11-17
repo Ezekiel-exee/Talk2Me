@@ -46,7 +46,7 @@ export default function RoomView({
         typingNames={typingNames}
         onSeen={markSeen}
         onTyping={sendTyping}
-        onLeave={() => onLeave(room)}
+        onLeave={(forget) => onLeave(room, forget)}
         onOpenLobbies={onOpenLobbies}
         onOpenMembers={onOpenMembers}
       />

@@ -386,6 +386,343 @@ grant execute on function public.edit_message(uuid, text, text, text) to anon, a
 grant execute on function public.toggle_reaction(uuid, text, text, text) to anon, authenticated;
 
 -- ---------------------------------------------------------------------------
+-- Private lobbies (invite link, no password, visible only to members)
+-- Later definitions below intentionally supersede the public-only versions above.
+-- ---------------------------------------------------------------------------
+alter table public.rooms add column if not exists is_private boolean not null default false;
+alter table public.rooms add column if not exists invite_token text;
+create unique index if not exists rooms_invite_token_idx on public.rooms (invite_token) where invite_token is not null;
+
+create table if not exists public.private_members (
+  room_id    uuid not null references public.rooms(id) on delete cascade,
+  user_id    text not null,
+  joined_at  timestamptz not null default now(),
+  primary key (room_id, user_id)
+);
+create index if not exists private_members_user_idx on public.private_members (user_id);
+alter table public.private_members enable row level security;
+revoke all on public.private_members from anon, authenticated;
+
+-- Private rows are invisible to the public tables; members use the RPCs below and
+-- receive live changes as broadcasts on the unguessable topic 'priv:<room id>'.
+drop policy if exists "rooms are publicly readable" on public.rooms;
+drop policy if exists "public rooms are readable" on public.rooms;
+create policy "public rooms are readable"
+  on public.rooms for select to anon, authenticated using (not is_private);
+
+drop policy if exists "messages are publicly readable" on public.messages;
+drop policy if exists "public room messages are readable" on public.messages;
+create policy "public room messages are readable"
+  on public.messages for select to anon, authenticated
+  using (exists (select 1 from public.rooms r where r.id = room_id and not r.is_private));
+
+drop policy if exists "reactions are publicly readable" on public.message_reactions;
+drop policy if exists "public room reactions are readable" on public.message_reactions;
+create policy "public room reactions are readable"
+  on public.message_reactions for select to anon, authenticated
+  using (exists (select 1 from public.rooms r where r.id = room_id and not r.is_private));
+
+drop policy if exists "anyone can post messages" on public.messages;
+create policy "anyone can post messages"
+  on public.messages for insert to anon, authenticated
+  with check (kind = 'user' and exists (
+    select 1 from public.rooms r where r.id = room_id and r.archived_at is null and not r.is_private));
+
+create or replace function public.assert_member(p_room_id uuid, p_user_id text, p_secret text)
+returns void
+language plpgsql
+security definer
+set search_path = public, extensions
+as $$
+begin
+  perform public.check_user(p_user_id, p_secret, false);
+  if not exists (select 1 from public.private_members m where m.room_id = p_room_id and m.user_id = p_user_id) then
+    raise exception 'You are not a member of this lobby';
+  end if;
+end;
+$$;
+
+create or replace function public.assert_room_access(p_room_id uuid, p_user_id text, p_secret text)
+returns void
+language plpgsql
+security definer
+set search_path = public, extensions
+as $$
+begin
+  if exists (select 1 from public.rooms r where r.id = p_room_id and r.is_private) then
+    perform public.assert_member(p_room_id, p_user_id, p_secret);
+  end if;
+end;
+$$;
+
+drop function if exists public.create_room(text, text, int, text);
+create or replace function public.create_room(
+  p_name text, p_password text, p_max_users int, p_created_by text default null,
+  p_private boolean default false, p_secret text default null)
+returns public.rooms
+language plpgsql
+security definer
+set search_path = public, extensions
+as $$
+declare
+  new_room public.rooms;
+begin
+  if p_name is null or char_length(btrim(p_name)) not between 1 and 40 then
+    raise exception 'Room name must be 1-40 characters';
+  end if;
+  if p_max_users is null or p_max_users not between 2 and 50 then
+    raise exception 'User limit must be between 2 and 50';
+  end if;
+
+  if p_private then
+    perform public.check_user(p_created_by, p_secret, true);
+    insert into public.rooms (name, max_users, created_by, is_private, invite_token)
+    values (btrim(p_name), p_max_users, p_created_by, true, encode(gen_random_bytes(18), 'hex'))
+    returning * into new_room;
+    insert into public.private_members (room_id, user_id) values (new_room.id, p_created_by);
+  else
+    if p_password is null or char_length(p_password) not between 1 and 64 then
+      raise exception 'Password must be 1-64 characters';
+    end if;
+    insert into public.rooms (name, max_users, created_by)
+    values (btrim(p_name), p_max_users, p_created_by)
+    returning * into new_room;
+    insert into public.room_secrets (room_id, password_hash)
+    values (new_room.id, crypt(p_password, gen_salt('bf')));
+  end if;
+
+  return new_room;
+end;
+$$;
+
+create or replace function public.join_private_room(p_token text, p_user_id text, p_secret text)
+returns public.rooms
+language plpgsql
+security definer
+set search_path = public, extensions
+as $$
+declare
+  r public.rooms;
+begin
+  perform public.check_user(p_user_id, p_secret, true);
+  select * into r from public.rooms where is_private and invite_token = p_token;
+  if not found then
+    raise exception 'This invite link is not valid';
+  end if;
+  insert into public.private_members (room_id, user_id) values (r.id, p_user_id) on conflict do nothing;
+  if r.archived_at is not null then
+    update public.rooms set archived_at = null where id = r.id returning * into r;
+  end if;
+  return r;
+end;
+$$;
+
+create or replace function public.list_private_rooms(p_user_id text, p_secret text)
+returns setof public.rooms
+language plpgsql
+security definer
+set search_path = public, extensions
+as $$
+begin
+  begin
+    perform public.check_user(p_user_id, p_secret, false);
+  exception when others then
+    return;
+  end;
+  return query
+    select r.* from public.rooms r
+    join public.private_members m on m.room_id = r.id
+    where m.user_id = p_user_id
+    order by r.created_at desc;
+end;
+$$;
+
+create or replace function public.forget_private_room(p_room_id uuid, p_user_id text, p_secret text)
+returns void
+language plpgsql
+security definer
+set search_path = public, extensions
+as $$
+begin
+  perform public.assert_member(p_room_id, p_user_id, p_secret);
+  delete from public.private_members where room_id = p_room_id and user_id = p_user_id;
+end;
+$$;
+
+create or replace function public.private_snapshot(p_room_id uuid, p_user_id text, p_secret text)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public, extensions
+as $$
+begin
+  perform public.assert_member(p_room_id, p_user_id, p_secret);
+  return jsonb_build_object(
+    'messages', coalesce((
+      select jsonb_agg(to_jsonb(m) order by m.created_at desc)
+      from (
+        select id, room_id, user_id, username, content, created_at, reply_to, edited_at, kind
+        from public.messages where room_id = p_room_id order by created_at desc limit 100
+      ) m), '[]'::jsonb),
+    'reactions', coalesce((
+      select jsonb_agg(to_jsonb(x))
+      from (
+        select message_id, room_id, user_id, emoji
+        from public.message_reactions where room_id = p_room_id order by created_at limit 3000
+      ) x), '[]'::jsonb));
+end;
+$$;
+
+create or replace function public.private_messages_by_ids(p_room_id uuid, p_user_id text, p_secret text, p_ids uuid[])
+returns jsonb
+language plpgsql
+security definer
+set search_path = public, extensions
+as $$
+begin
+  perform public.assert_member(p_room_id, p_user_id, p_secret);
+  return coalesce((
+    select jsonb_agg(to_jsonb(m))
+    from (select id, user_id, username, content from public.messages
+          where room_id = p_room_id and id = any(p_ids)) m), '[]'::jsonb);
+end;
+$$;
+
+create or replace function public.send_message(
+  p_id uuid, p_room_id uuid, p_user_id text, p_secret text,
+  p_username text, p_content text, p_reply_to uuid default null)
+returns void
+language plpgsql
+security definer
+set search_path = public, extensions
+as $$
+begin
+  perform public.check_user(p_user_id, p_secret, true);
+  perform public.assert_room_access(p_room_id, p_user_id, p_secret);
+  if not exists (select 1 from public.rooms r where r.id = p_room_id and r.archived_at is null) then
+    raise exception 'This lobby is archived or no longer exists';
+  end if;
+  if p_reply_to is not null
+     and not exists (select 1 from public.messages m where m.id = p_reply_to and m.room_id = p_room_id) then
+    p_reply_to := null;
+  end if;
+  insert into public.messages (id, room_id, user_id, username, content, reply_to)
+  values (p_id, p_room_id, p_user_id, p_username, p_content, p_reply_to);
+end;
+$$;
+
+create or replace function public.toggle_reaction(p_message_id uuid, p_user_id text, p_secret text, p_emoji text)
+returns void
+language plpgsql
+security definer
+set search_path = public, extensions
+as $$
+declare
+  rid uuid;
+begin
+  perform public.check_user(p_user_id, p_secret, true);
+  if p_emoji is null or char_length(p_emoji) not between 1 and 16 then
+    raise exception 'Invalid emoji';
+  end if;
+  select room_id into rid from public.messages where id = p_message_id and kind = 'user';
+  if rid is null then raise exception 'Message not found'; end if;
+  perform public.assert_room_access(rid, p_user_id, p_secret);
+
+  delete from public.message_reactions
+   where message_id = p_message_id and user_id = p_user_id and emoji = p_emoji;
+  if not found then
+    if (select count(distinct emoji) from public.message_reactions where message_id = p_message_id) >= 20 then
+      raise exception 'Too many different reactions on this message';
+    end if;
+    insert into public.message_reactions (message_id, room_id, user_id, emoji)
+    values (p_message_id, rid, p_user_id, p_emoji);
+  end if;
+end;
+$$;
+
+-- Members' heartbeats also un-archive a private lobby (public ones need the password).
+create or replace function public.room_heartbeat(p_room_id uuid, p_user_id text, p_secret text, p_username text default null)
+returns void
+language plpgsql
+security definer
+set search_path = public, extensions
+as $$
+declare
+  is_new boolean;
+  uname text;
+  rm public.rooms;
+begin
+  perform public.check_user(p_user_id, p_secret, true);
+  perform public.assert_room_access(p_room_id, p_user_id, p_secret);
+  select * into rm from public.rooms where id = p_room_id;
+  if not found then return; end if;
+  if rm.archived_at is not null then
+    if not rm.is_private then return; end if;
+    update public.rooms set archived_at = null where id = p_room_id;
+  end if;
+  uname := left(coalesce(nullif(btrim(p_username), ''), 'Someone'), 32);
+  insert into public.room_members (room_id, user_id, last_seen, username)
+  values (p_room_id, p_user_id, now(), uname)
+  on conflict (room_id, user_id) do update set last_seen = excluded.last_seen, username = excluded.username
+  returning (xmax = 0) into is_new;
+  if is_new then
+    insert into public.messages (room_id, user_id, username, content, kind)
+    values (p_room_id, p_user_id, uname, 'joined the lobby', 'system');
+  end if;
+end;
+$$;
+
+-- Pushes changes in private lobbies to their members over Realtime Broadcast.
+create or replace function public.broadcast_private_change()
+returns trigger
+language plpgsql
+security definer
+set search_path = public, extensions
+as $$
+declare
+  rid uuid;
+begin
+  rid := case when tg_op = 'DELETE' then old.room_id else new.room_id end;
+  if exists (select 1 from public.rooms r where r.id = rid and r.is_private) then
+    perform realtime.send(
+      jsonb_build_object(
+        'table', tg_table_name,
+        'type', tg_op,
+        'new', case when tg_op = 'DELETE' then null else to_jsonb(new) end,
+        'old', case when tg_op = 'INSERT' then null else to_jsonb(old) end),
+      'change', 'priv:' || rid::text, false);
+  end if;
+  return null;
+end;
+$$;
+
+drop trigger if exists messages_private_broadcast on public.messages;
+create trigger messages_private_broadcast
+  after insert or update on public.messages
+  for each row execute function public.broadcast_private_change();
+
+drop trigger if exists reactions_private_broadcast on public.message_reactions;
+create trigger reactions_private_broadcast
+  after insert or delete on public.message_reactions
+  for each row execute function public.broadcast_private_change();
+
+revoke all on function public.assert_member(uuid, text, text) from public, anon, authenticated;
+revoke all on function public.assert_room_access(uuid, text, text) from public, anon, authenticated;
+revoke all on function public.broadcast_private_change() from public, anon, authenticated;
+revoke all on function public.create_room(text, text, int, text, boolean, text) from public;
+revoke all on function public.join_private_room(text, text, text) from public;
+revoke all on function public.list_private_rooms(text, text) from public;
+revoke all on function public.forget_private_room(uuid, text, text) from public;
+revoke all on function public.private_snapshot(uuid, text, text) from public;
+revoke all on function public.private_messages_by_ids(uuid, text, text, uuid[]) from public;
+grant execute on function public.create_room(text, text, int, text, boolean, text) to anon, authenticated;
+grant execute on function public.join_private_room(text, text, text) to anon, authenticated;
+grant execute on function public.list_private_rooms(text, text) to anon, authenticated;
+grant execute on function public.forget_private_room(uuid, text, text) to anon, authenticated;
+grant execute on function public.private_snapshot(uuid, text, text) to anon, authenticated;
+grant execute on function public.private_messages_by_ids(uuid, text, text, uuid[]) to anon, authenticated;
+
+-- ---------------------------------------------------------------------------
 -- Scheduled safety net (pg_cron, every 30 seconds)
 -- ---------------------------------------------------------------------------
 create extension if not exists pg_cron with schema pg_catalog;

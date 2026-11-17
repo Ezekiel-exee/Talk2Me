@@ -5,6 +5,8 @@ import { useIdentity } from './hooks/useIdentity';
 import { useRooms } from './hooks/useRooms';
 import { useLobbyPresence } from './hooks/useLobbyPresence';
 import { useVisualViewportHeight } from './hooks/useVisualViewportHeight';
+import { usePrivateRooms } from './hooks/usePrivateRooms';
+import { getUserSecret } from './lib/utils';
 import LobbySidebar from './components/LobbySidebar';
 import RoomView from './components/RoomView';
 import CreateRoomModal from './components/CreateRoomModal';
@@ -33,6 +35,7 @@ export default function App() {
   useVisualViewportHeight();
   const { userId, username, setUsername } = useIdentity();
   const { rooms: allRooms, setRooms, loading, error } = useRooms();
+  const { privateRooms, upsertPrivateRoom, removePrivateRoom } = usePrivateRooms(userId);
   const rooms = allRooms.filter((r) => !r.archived_at);
   const archivedRooms = allRooms.filter((r) => r.archived_at);
 
@@ -47,18 +50,33 @@ export default function App() {
   const [notice, setNotice] = useState('');
   const verifiedRef = useRef(new Map());
   const healingRef = useRef(new Set());
+  const inviteHandledRef = useRef(false);
 
   const joinedIds = joinedRooms.map((r) => r.id);
-  const occupancy = useLobbyPresence({ userId, username, roomIds: joinedIds });
+  // Private lobby ids are never announced on the shared lobby channel.
+  const occupancy = useLobbyPresence({
+    userId,
+    username,
+    roomIds: joinedRooms.filter((r) => !r.is_private).map((r) => r.id),
+  });
 
   const flash = useCallback((text) => {
     setNotice(text);
     setTimeout(() => setNotice((current) => (current === text ? '' : current)), 5000);
   }, []);
 
-  const leaveRoom = useCallback((room) => {
-    setJoinedRooms((prev) => prev.filter((r) => r.id !== room.id));
-  }, []);
+  const leaveRoom = useCallback(
+    (room, forget = false) => {
+      setJoinedRooms((prev) => prev.filter((r) => r.id !== room.id));
+      if (forget && room.is_private) {
+        removePrivateRoom(room.id);
+        supabase
+          .rpc('forget_private_room', { p_room_id: room.id, p_user_id: userId, p_secret: getUserSecret() })
+          .then(() => {}, () => {});
+      }
+    },
+    [removePrivateRoom, userId],
+  );
 
   const handleRoomFull = useCallback(
     (room) => {
@@ -68,11 +86,11 @@ export default function App() {
     [leaveRoom, flash],
   );
 
-  // Drop rooms that were deleted server-side.
+  // Drop public rooms that were deleted server-side (private ones aren't in the public list).
   useEffect(() => {
     if (loading) return;
     setJoinedRooms((prev) => {
-      const next = prev.filter((r) => allRooms.some((a) => a.id === r.id));
+      const next = prev.filter((r) => r.is_private || allRooms.some((a) => a.id === r.id));
       return next.length === prev.length ? prev : next;
     });
   }, [allRooms, loading]);
@@ -85,6 +103,7 @@ export default function App() {
 
   // If a lobby got archived while we're still in it (e.g. a throttled background
   // tab missed heartbeats), restore it using the password we already verified.
+  // (Private lobbies restore themselves on the next heartbeat.)
   useEffect(() => {
     joinedRooms.forEach((joined) => {
       const current = allRooms.find((r) => r.id === joined.id);
@@ -111,8 +130,35 @@ export default function App() {
     setRightOpen(false);
   };
 
+  // Joins (or re-enters) a private lobby with its invite token; this also un-archives it.
+  const enterPrivate = async (token) => {
+    const { data, error: err } = await supabase.rpc('join_private_room', {
+      p_token: token,
+      p_user_id: userId,
+      p_secret: getUserSecret(),
+    });
+    if (err) return flash(err.message);
+    upsertPrivateRoom(data);
+    enterRoom(data);
+  };
+
+  // Open an invite link (?invite=<token>) once we know who the user is.
+  useEffect(() => {
+    if (!username || inviteHandledRef.current) return;
+    inviteHandledRef.current = true;
+    const token = new URLSearchParams(window.location.search).get('invite');
+    if (!token) return;
+    window.history.replaceState({}, '', window.location.pathname);
+    enterPrivate(token);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [username]);
+
   const selectRoom = (room) => {
     if (isJoined(room)) return enterRoom(room);
+    if (room.is_private) {
+      setLeftOpen(false);
+      return enterPrivate(room.invite_token);
+    }
     if (isFull(room)) return flash(`"${room.name}" is full (${room.max_users}/${room.max_users}).`);
     if (verifiedRef.current.has(room.id)) return enterRoom(room);
     setPendingRestore(false);
@@ -151,12 +197,14 @@ export default function App() {
     return null;
   };
 
-  const createRoom = async ({ name, password, maxUsers }) => {
+  const createRoom = async ({ name, password, maxUsers, isPrivate }) => {
     const { data, error: err } = await supabase.rpc('create_room', {
       p_name: name,
-      p_password: password,
+      p_password: isPrivate ? null : password,
       p_max_users: maxUsers,
       p_created_by: userId,
+      p_private: isPrivate,
+      p_secret: getUserSecret(),
     });
     if (err) return err.message;
     const room = {
@@ -165,9 +213,14 @@ export default function App() {
       max_users: data.max_users,
       created_at: data.created_at,
       archived_at: null,
+      is_private: Boolean(data.is_private),
+      invite_token: data.invite_token ?? null,
     };
-    setRooms((prev) => (prev.some((r) => r.id === room.id) ? prev : [room, ...prev]));
-    verifiedRef.current.set(room.id, password);
+    if (room.is_private) upsertPrivateRoom(room);
+    else {
+      setRooms((prev) => (prev.some((r) => r.id === room.id) ? prev : [room, ...prev]));
+      verifiedRef.current.set(room.id, password);
+    }
     setShowCreate(false);
     enterRoom(room);
     return null;
@@ -184,6 +237,7 @@ export default function App() {
     >
       <LobbySidebar
         rooms={rooms}
+        privateRooms={privateRooms}
         archivedRooms={archivedRooms}
         occupancy={occupancy}
         loading={loading}

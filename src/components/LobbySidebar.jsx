@@ -1,10 +1,11 @@
 import { useState } from 'react';
-import { Archive, Hash, Lock, MessageCircle, Pencil, Plus, RotateCcw } from 'lucide-react';
+import { Archive, EyeOff, Hash, Lock, MessageCircle, Pencil, Plus, RotateCcw } from 'lucide-react';
 import { colorFor, initialOf } from '../lib/utils';
 import { useSwipeToClose } from '../hooks/useSwipeToClose';
 
 export default function LobbySidebar({
   rooms,
+  privateRooms = [],
   archivedRooms,
   occupancy,
   loading,
@@ -114,6 +115,40 @@ export default function LobbySidebar({
               );
             })}
           </div>
+
+          {privateRooms.length > 0 && (
+            <div className="border-t border-black/20 px-2 py-2">
+              <div className="flex items-center gap-2 px-2 pb-1 text-xs font-bold uppercase tracking-wide text-discord-muted">
+                <EyeOff size={14} /> Private Lobbies - {privateRooms.length}
+              </div>
+              <div className="max-h-40 space-y-0.5 overflow-y-auto">
+                {privateRooms.map((room) => {
+                  const joined = joinedIds.includes(room.id);
+                  const active = room.id === activeRoomId;
+                  return (
+                    <button
+                      key={room.id}
+                      type="button"
+                      onClick={() => onSelectRoom(room)}
+                      title={joined ? "You're in this lobby" : 'Open this lobby'}
+                      className={`flex w-full items-center gap-2 rounded px-2 py-2 text-left transition ${
+                        active ? 'bg-discord-input text-white' : 'text-discord-muted hover:bg-discord-hover hover:text-discord-text'
+                      }`}
+                    >
+                      <span className="relative shrink-0">
+                        <Hash size={18} />
+                        {joined && (
+                          <span className="absolute -right-1 -top-1 h-2.5 w-2.5 rounded-full border-2 border-discord-sidebar bg-discord-green" />
+                        )}
+                      </span>
+                      <span className="min-w-0 flex-1 truncate font-medium">{room.name}</span>
+                      <EyeOff size={13} className="shrink-0" aria-label="Private" />
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
 
           <div className="border-t border-black/20 px-2 py-2">
             <button

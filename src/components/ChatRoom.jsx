@@ -1,5 +1,5 @@
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { Hash, Lock, LogOut, Menu, SendHorizontal, Users, X } from 'lucide-react';
+import { Check, EyeOff, Hash, Link2, Lock, LogOut, Menu, SendHorizontal, Users, X } from 'lucide-react';
 import { supabase } from '../supabaseClient';
 import { colorFor, getUserSecret, initialOf, newId, shortTime } from '../lib/utils';
 import ConfirmLeaveModal from './ConfirmLeaveModal';
@@ -85,6 +85,7 @@ export default function ChatRoom({
   const [draft, setDraft] = useState('');
   const [error, setError] = useState('');
   const [confirmLeave, setConfirmLeave] = useState(false);
+  const [copied, setCopied] = useState(false);
   const [replyingTo, setReplyingTo] = useState(null);
   const [editingId, setEditingId] = useState(null);
   const [sheetMsg, setSheetMsg] = useState(null);
@@ -135,44 +136,71 @@ export default function ChatRoom({
     const msgFilter = { schema: 'public', table: 'messages', filter: `room_id=eq.${room.id}` };
     const reactFilter = { schema: 'public', table: 'message_reactions' };
 
-    const channel = supabase
-      .channel(`messages:${room.id}`)
-      .on('postgres_changes', { event: 'INSERT', ...msgFilter }, (p) => merge([p.new]))
-      .on('postgres_changes', { event: 'UPDATE', ...msgFilter }, (p) => merge([p.new]))
-      .on('postgres_changes', { event: 'INSERT', ...reactFilter, filter: `room_id=eq.${room.id}` }, (p) =>
-        addReactions([p.new]),
-      )
-      // DELETE events can't be filtered server-side, so check the room here.
-      .on('postgres_changes', { event: 'DELETE', ...reactFilter }, (p) => {
-        if (p.old?.room_id === room.id) removeReaction(p.old);
-      })
-      .subscribe(async (status) => {
-        if (status !== 'SUBSCRIBED') return;
-        const { data, error: err } = await supabase
-          .from('messages')
-          .select(MESSAGE_COLUMNS)
-          .eq('room_id', room.id)
-          .order('created_at', { ascending: false })
-          .limit(100);
-        if (cancelled) return;
-        if (err) setError(err.message);
-        else merge(data);
-        setLoading(false);
+    let channel;
+    if (room.is_private) {
+      // Private lobbies aren't readable through the public tables: history comes from a
+      // membership-checked RPC and live changes arrive as broadcasts on a per-room topic.
+      const creds = { p_room_id: room.id, p_user_id: userId, p_secret: getUserSecret() };
+      channel = supabase
+        .channel(`priv:${room.id}`)
+        .on('broadcast', { event: 'change' }, ({ payload }) => {
+          if (payload.table === 'messages' && payload.new) merge([payload.new]);
+          else if (payload.table === 'message_reactions') {
+            if (payload.type === 'INSERT' && payload.new) addReactions([payload.new]);
+            else if (payload.type === 'DELETE' && payload.old) removeReaction(payload.old);
+          }
+        })
+        .subscribe(async (status) => {
+          if (status !== 'SUBSCRIBED') return;
+          const { data, error: err } = await supabase.rpc('private_snapshot', creds);
+          if (cancelled) return;
+          if (err) setError(err.message);
+          else {
+            merge(data.messages ?? []);
+            addReactions(data.reactions ?? []);
+          }
+          setLoading(false);
+        });
+    } else {
+      channel = supabase
+        .channel(`messages:${room.id}`)
+        .on('postgres_changes', { event: 'INSERT', ...msgFilter }, (p) => merge([p.new]))
+        .on('postgres_changes', { event: 'UPDATE', ...msgFilter }, (p) => merge([p.new]))
+        .on('postgres_changes', { event: 'INSERT', ...reactFilter, filter: `room_id=eq.${room.id}` }, (p) =>
+          addReactions([p.new]),
+        )
+        // DELETE events can't be filtered server-side, so check the room here.
+        .on('postgres_changes', { event: 'DELETE', ...reactFilter }, (p) => {
+          if (p.old?.room_id === room.id) removeReaction(p.old);
+        })
+        .subscribe(async (status) => {
+          if (status !== 'SUBSCRIBED') return;
+          const { data, error: err } = await supabase
+            .from('messages')
+            .select(MESSAGE_COLUMNS)
+            .eq('room_id', room.id)
+            .order('created_at', { ascending: false })
+            .limit(100);
+          if (cancelled) return;
+          if (err) setError(err.message);
+          else merge(data);
+          setLoading(false);
 
-        const { data: rows } = await supabase
-          .from('message_reactions')
-          .select('message_id, room_id, user_id, emoji')
-          .eq('room_id', room.id)
-          .order('created_at', { ascending: true })
-          .limit(3000);
-        if (!cancelled && rows) addReactions(rows);
-      });
+          const { data: rows } = await supabase
+            .from('message_reactions')
+            .select('message_id, room_id, user_id, emoji')
+            .eq('room_id', room.id)
+            .order('created_at', { ascending: true })
+            .limit(3000);
+          if (!cancelled && rows) addReactions(rows);
+        });
+    }
 
     return () => {
       cancelled = true;
       supabase.removeChannel(channel);
     };
-  }, [room.id, addReactions, removeReaction]);
+  }, [room.id, room.is_private, userId, addReactions, removeReaction]);
 
   const messagesById = useMemo(() => new Map(messages.map((m) => [m.id, m])), [messages]);
 
@@ -184,14 +212,24 @@ export default function ChatRoom({
     if (!missing.length) return;
     const ids = [...new Set(missing)];
     ids.forEach((id) => requestedReplies.current.add(id));
-    supabase
-      .from('messages')
-      .select('id, user_id, username, content')
-      .in('id', ids)
-      .then(({ data }) => {
-        if (data) setReplyCache((prev) => ({ ...prev, ...Object.fromEntries(data.map((m) => [m.id, m])) }));
-      });
-  }, [messages, messagesById]);
+    const request = room.is_private
+      ? supabase
+          .rpc('private_messages_by_ids', {
+            p_room_id: room.id,
+            p_user_id: userId,
+            p_secret: getUserSecret(),
+            p_ids: ids,
+          })
+          .then(({ data }) => data ?? [])
+      : supabase
+          .from('messages')
+          .select('id, user_id, username, content')
+          .in('id', ids)
+          .then(({ data }) => data ?? []);
+    request.then((rows) => {
+      if (rows.length) setReplyCache((prev) => ({ ...prev, ...Object.fromEntries(rows.map((m) => [m.id, m])) }));
+    });
+  }, [messages, messagesById, room.id, room.is_private, userId]);
 
   // Join/leave notices are stored as 'system' messages; everything else uses chatMessages.
   const chatMessages = useMemo(() => messages.filter((m) => m.kind !== 'system'), [messages]);
@@ -405,6 +443,16 @@ export default function ChatRoom({
   };
 
   // Enter sends, Shift+Enter adds a line. On touch screens Enter adds a line (use the send button).
+  const copyInvite = async () => {
+    const link = `${window.location.origin}/?invite=${room.invite_token}`;
+    try {
+      await navigator.clipboard.writeText(link);
+    } catch {
+      window.prompt('Copy this invite link:', link);
+    }
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
   const handleKeyDown = (e) => {
     if (e.key === 'Escape' && replyingTo) {
       setReplyingTo(null);
@@ -432,10 +480,22 @@ export default function ChatRoom({
         </button>
         <Hash size={22} className="shrink-0 text-discord-muted" />
         <h1 className="truncate font-semibold text-white">{room.name}</h1>
-        <span className="flex items-center gap-1 rounded bg-discord-rail px-1.5 py-0.5 text-xs text-discord-muted">
-          <Lock size={12} /> Private
+        <span className="flex shrink-0 items-center gap-1 rounded bg-discord-rail px-1.5 py-0.5 text-xs text-discord-muted">
+          {room.is_private ? <EyeOff size={12} /> : <Lock size={12} />}
+          {room.is_private ? 'Private' : 'Public'}
         </span>
         <div className="ml-auto flex items-center gap-2">
+          {room.is_private && room.invite_token && (
+            <button
+              type="button"
+              onClick={copyInvite}
+              title="Copy invite link"
+              className="flex items-center gap-1.5 rounded bg-discord-blurple px-3 py-1.5 text-sm font-medium text-white transition hover:bg-discord-blurpleHover"
+            >
+              {copied ? <Check size={15} /> : <Link2 size={15} />}
+              <span className="hidden sm:inline">{copied ? 'Copied!' : 'Invite'}</span>
+            </button>
+          )}
           <button
             type="button"
             onClick={() => setConfirmLeave(true)}
@@ -575,9 +635,9 @@ export default function ChatRoom({
         <ConfirmLeaveModal
           room={room}
           isLast={memberCount <= 1}
-          onConfirm={() => {
+          onConfirm={(forget) => {
             setConfirmLeave(false);
-            onLeave();
+            onLeave(forget);
           }}
           onClose={() => setConfirmLeave(false)}
         />
