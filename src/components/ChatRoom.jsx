@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Hash, Lock, LogOut, Menu, SendHorizontal, Users } from 'lucide-react';
 import { supabase } from '../supabaseClient';
 import { colorFor, formatTime, initialOf, newId, shortTime } from '../lib/utils';
@@ -6,6 +6,56 @@ import ConfirmLeaveModal from './ConfirmLeaveModal';
 
 const MAX_LEN = 2000;
 const GROUP_WINDOW_MS = 5 * 60 * 1000;
+const TYPING_REFRESH_MS = 2500;
+const TYPING_IDLE_MS = 3000;
+
+function typingText(names) {
+  if (names.length === 1) return `${names[0]} is typing`;
+  if (names.length === 2) return `${names[0]} and ${names[1]} are typing`;
+  return `${names[0]}, ${names[1]} and ${names.length - 2} other${names.length > 3 ? 's' : ''} are typing`;
+}
+
+function TypingIndicator({ names }) {
+  return (
+    <div className="flex h-5 items-center gap-2 text-xs font-medium text-discord-text" aria-live="polite">
+      {names.length > 0 && (
+        <>
+          <span className="flex items-center gap-0.5" aria-hidden="true">
+            {[0, 1, 2].map((i) => (
+              <span
+                key={i}
+                className="h-1.5 w-1.5 animate-bounce rounded-full bg-discord-text"
+                style={{ animationDelay: `${i * 150}ms` }}
+              />
+            ))}
+          </span>
+          <span className="truncate">{typingText(names)}…</span>
+        </>
+      )}
+    </div>
+  );
+}
+
+function SeenRow({ readers }) {
+  const names = readers.map((r) => r.username);
+  const label = names.length > 3 ? `${names.slice(0, 3).join(', ')} +${names.length - 3}` : names.join(', ');
+  return (
+    <div className="flex items-center gap-1.5 py-0.5 pl-[4.5rem] pr-4" title={`Seen by ${names.join(', ')}`}>
+      <span className="flex -space-x-1">
+        {readers.slice(0, 5).map((r) => (
+          <span
+            key={r.userId}
+            className="flex h-4 w-4 items-center justify-center rounded-full border border-discord-chat text-[9px] font-bold text-white"
+            style={{ backgroundColor: colorFor(r.userId) }}
+          >
+            {initialOf(r.username)}
+          </span>
+        ))}
+      </span>
+      <span className="truncate text-xs text-discord-muted">Seen by {label}</span>
+    </div>
+  );
+}
 
 export default function ChatRoom({
   room,
@@ -15,6 +65,9 @@ export default function ChatRoom({
   systemMessages,
   memberCount,
   members,
+  typingNames = [],
+  onSeen,
+  onTyping,
   onLeave,
   onOpenLobbies,
   onOpenMembers,
@@ -26,6 +79,12 @@ export default function ChatRoom({
   const [confirmLeave, setConfirmLeave] = useState(false);
   const scrollRef = useRef(null);
   const stickRef = useRef(true);
+  const latestIdRef = useRef(null);
+  const visibleRef = useRef(visible);
+  const typingSentAt = useRef(0);
+  const typingIdle = useRef(null);
+
+  visibleRef.current = visible;
 
   useEffect(() => {
     setMessages([]);
@@ -85,9 +144,69 @@ export default function ChatRoom({
     if (el && stickRef.current) el.scrollTop = el.scrollHeight;
   }, [items, visible]);
 
+  latestIdRef.current = messages[messages.length - 1]?.id ?? null;
+
+  // A message counts as seen once this lobby is on screen, the tab is in the
+  // foreground and the newest message is in view.
+  const reportSeen = useCallback(() => {
+    if (visibleRef.current && document.visibilityState === 'visible' && stickRef.current) {
+      onSeen(latestIdRef.current);
+    }
+  }, [onSeen]);
+
+  useEffect(() => {
+    reportSeen();
+  }, [messages, visible, reportSeen]);
+
+  useEffect(() => {
+    document.addEventListener('visibilitychange', reportSeen);
+    window.addEventListener('focus', reportSeen);
+    return () => {
+      document.removeEventListener('visibilitychange', reportSeen);
+      window.removeEventListener('focus', reportSeen);
+    };
+  }, [reportSeen]);
+
+  // For each other member, show their avatar under the newest message from someone
+  // else that they have seen (like Messenger read receipts).
+  const seenBy = useMemo(() => {
+    const byMessage = new Map();
+    members.forEach((m) => {
+      if (m.userId === userId || !m.seenId) return;
+      let idx = messages.findIndex((x) => x.id === m.seenId);
+      while (idx >= 0 && messages[idx].user_id === m.userId) idx -= 1;
+      if (idx < 0) return;
+      const id = messages[idx].id;
+      byMessage.set(id, [...(byMessage.get(id) ?? []), m]);
+    });
+    return byMessage;
+  }, [members, messages, userId]);
+
   const onScroll = () => {
     const el = scrollRef.current;
     stickRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+    if (stickRef.current) reportSeen();
+  };
+
+  const stopTyping = () => {
+    clearTimeout(typingIdle.current);
+    if (typingSentAt.current) onTyping(false);
+    typingSentAt.current = 0;
+  };
+
+  useEffect(() => () => clearTimeout(typingIdle.current), []);
+
+  const handleChange = (e) => {
+    const value = e.target.value;
+    setDraft(value);
+    if (!value.trim()) return stopTyping();
+    const now = Date.now();
+    if (now - typingSentAt.current > TYPING_REFRESH_MS) {
+      typingSentAt.current = now;
+      onTyping(true);
+    }
+    clearTimeout(typingIdle.current);
+    typingIdle.current = setTimeout(stopTyping, TYPING_IDLE_MS);
   };
 
   const send = async (e) => {
@@ -97,6 +216,7 @@ export default function ChatRoom({
     setDraft('');
     setError('');
     stickRef.current = true;
+    stopTyping();
 
     const message = {
       id: newId(),
@@ -172,15 +292,17 @@ export default function ChatRoom({
           const color = colorFor(item.user_id);
           const author = currentNames.get(item.user_id) ?? item.username;
 
-          return grouped ? (
-            <div key={item.id} className="group relative flex px-4 py-0.5 hover:bg-black/5">
+          const readers = seenBy.get(item.id);
+
+          const row = grouped ? (
+            <div className="group relative flex px-4 py-0.5 hover:bg-black/5">
               <span className="w-10 shrink-0 pt-0.5 text-center text-[10px] text-transparent group-hover:text-discord-muted">
                 {shortTime(item.created_at)}
               </span>
               <p className="ml-4 min-w-0 whitespace-pre-wrap break-words text-discord-text">{item.content}</p>
             </div>
           ) : (
-            <div key={item.id} className="mt-3 flex px-4 py-0.5 hover:bg-black/5">
+            <div className="mt-3 flex px-4 py-0.5 hover:bg-black/5">
               <div
                 className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full font-bold text-white"
                 style={{ backgroundColor: color }}
@@ -198,16 +320,24 @@ export default function ChatRoom({
               </div>
             </div>
           );
+
+          return (
+            <Fragment key={item.id}>
+              {row}
+              {readers && <SeenRow readers={readers} />}
+            </Fragment>
+          );
         })}
       </div>
 
       <form onSubmit={send} className="shrink-0 px-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] pt-1 md:px-4 md:pb-6">
+        <TypingIndicator names={typingNames} />
         {error && <p className="mb-2 text-sm text-discord-red">{error}</p>}
         <div className="flex items-center gap-2 rounded-lg bg-discord-input px-4">
           <input
             value={draft}
             maxLength={MAX_LEN}
-            onChange={(e) => setDraft(e.target.value)}
+            onChange={handleChange}
             onFocus={() => {
               stickRef.current = true;
               setTimeout(() => {

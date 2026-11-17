@@ -19,7 +19,12 @@ export default function RoomView({
   onOpenMembers,
 }) {
   const handleFull = useCallback(() => onRoomFull(room), [onRoomFull, room]);
-  const { members, systemMessages } = useRoomPresence({ room, userId, username, onRoomFull: handleFull });
+  const { members, systemMessages, typingNames, markSeen, sendTyping } = useRoomPresence({
+    room,
+    userId,
+    username,
+    onRoomFull: handleFull,
+  });
   useRoomHeartbeat(room.id, userId);
 
   return (
@@ -32,6 +37,9 @@ export default function RoomView({
         systemMessages={systemMessages}
         memberCount={members.length}
         members={members}
+        typingNames={typingNames}
+        onSeen={markSeen}
+        onTyping={sendTyping}
         onLeave={() => onLeave(room)}
         onOpenLobbies={onOpenLobbies}
         onOpenMembers={onOpenMembers}
