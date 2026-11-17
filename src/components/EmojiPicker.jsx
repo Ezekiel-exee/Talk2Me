@@ -3,7 +3,7 @@ import { EMOJI_GROUPS } from '../lib/emojis';
 export default function EmojiPicker({ onPick, className = '' }) {
   return (
     <div
-      className={`max-h-64 w-72 overflow-y-auto rounded-lg border border-black/30 bg-discord-sidebar p-2 shadow-2xl ${className}`}
+      className={`max-h-64 w-72 overflow-y-auto overscroll-contain rounded-lg border border-black/30 bg-discord-sidebar p-2 shadow-2xl ${className}`}
       onClick={(e) => e.stopPropagation()}
     >
       {EMOJI_GROUPS.map((group) => (

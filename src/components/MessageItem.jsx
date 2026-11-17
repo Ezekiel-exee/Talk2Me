@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { CornerUpLeft, Pencil, SmilePlus } from 'lucide-react';
 import { colorFor, formatTime, initialOf, shortTime } from '../lib/utils';
 import { QUICK_EMOJIS } from '../lib/emojis';
@@ -81,38 +82,59 @@ export default function MessageItem({
   onJump,
   onLongPress,
 }) {
-  const [pickerOpen, setPickerOpen] = useState(false);
-  const [pickerUp, setPickerUp] = useState(false);
+  const [pickerPos, setPickerPos] = useState(null);
+  const pickerRef = useRef(null);
+  const pickerOpen = pickerPos !== null;
   const rowRef = useRef(null);
   const slideRef = useRef(null);
   const iconRef = useRef(null);
   const touch = useRef(null);
   const color = colorFor(item.user_id);
 
+  // The picker lives in a portal above everything; close it on outside click,
+  // Escape, resize, or when the message list behind it scrolls.
   useEffect(() => {
     if (!pickerOpen) return undefined;
-    const close = (e) => {
-      if (!rowRef.current?.querySelector('[data-picker]')?.contains(e.target)) setPickerOpen(false);
+    const close = () => setPickerPos(null);
+    const onMouseDown = (e) => {
+      if (pickerRef.current?.contains(e.target) || e.target.closest?.('[data-picker-trigger]')) return;
+      close();
     };
-    const esc = (e) => e.key === 'Escape' && setPickerOpen(false);
-    document.addEventListener('mousedown', close);
+    const onScroll = (e) => {
+      if (!pickerRef.current?.contains(e.target)) close();
+    };
+    const esc = (e) => e.key === 'Escape' && close();
+    document.addEventListener('mousedown', onMouseDown);
     document.addEventListener('keydown', esc);
+    document.addEventListener('scroll', onScroll, true);
+    window.addEventListener('resize', close);
     return () => {
-      document.removeEventListener('mousedown', close);
+      document.removeEventListener('mousedown', onMouseDown);
       document.removeEventListener('keydown', esc);
+      document.removeEventListener('scroll', onScroll, true);
+      window.removeEventListener('resize', close);
     };
   }, [pickerOpen]);
 
   const react = (emoji) => {
-    setPickerOpen(false);
+    setPickerPos(null);
     onReact(item, emoji);
   };
 
-  // Open the picker upwards for messages in the lower half of the screen.
-  const togglePicker = () => {
-    const rect = rowRef.current?.getBoundingClientRect();
-    setPickerUp(Boolean(rect) && rect.top > window.innerHeight / 2);
-    setPickerOpen((v) => !v);
+  // Anchor the picker to the clicked button, flipping above it if there's no room below.
+  const togglePicker = (e) => {
+    if (pickerOpen) return setPickerPos(null);
+    const rect = e.currentTarget.getBoundingClientRect();
+    const width = 288;
+    const height = 272;
+    const margin = 8;
+    const left = Math.min(Math.max(rect.right - width, margin), window.innerWidth - width - margin);
+    const below = window.innerHeight - rect.bottom;
+    setPickerPos(
+      below >= height + margin || below >= rect.top
+        ? { left, top: rect.bottom + 4 }
+        : { left, bottom: window.innerHeight - rect.top + 4 },
+    );
   };
 
   const setSlide = (dx, animate) => {
@@ -209,6 +231,7 @@ export default function MessageItem({
       <button
         type="button"
         onClick={togglePicker}
+        data-picker-trigger
         aria-label="Add reaction"
         className="rounded-md bg-discord-input px-1.5 py-1 text-discord-muted opacity-0 transition hover:text-white group-hover:opacity-100 [@media(pointer:coarse)]:hidden"
       >
@@ -237,6 +260,7 @@ export default function MessageItem({
         <button
           type="button"
           onClick={togglePicker}
+          data-picker-trigger
           className="flex h-7 w-7 items-center justify-center rounded text-discord-muted hover:bg-discord-hover hover:text-white"
           aria-label="Add reaction"
           title="Add reaction"
@@ -264,11 +288,6 @@ export default function MessageItem({
           </button>
         )}
       </div>
-      {pickerOpen && (
-        <div className={`absolute right-0 ${pickerUp ? 'bottom-full mb-1' : 'top-full mt-1'}`}>
-          <EmojiPicker onPick={react} />
-        </div>
-      )}
     </div>
   );
 
@@ -346,6 +365,20 @@ export default function MessageItem({
           </div>
         )}
       </div>
+      {pickerPos &&
+        createPortal(
+          <div
+            ref={pickerRef}
+            className="fixed z-[999]"
+            style={pickerPos}
+            onTouchStart={(e) => e.stopPropagation()}
+            onTouchMove={(e) => e.stopPropagation()}
+            onTouchEnd={(e) => e.stopPropagation()}
+          >
+            <EmojiPicker onPick={react} />
+          </div>,
+          document.body,
+        )}
     </div>
   );
 }
