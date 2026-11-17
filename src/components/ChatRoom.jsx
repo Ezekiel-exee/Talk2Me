@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Hash, Lock, LogOut, Menu, SendHorizontal, Users } from 'lucide-react';
 import { supabase } from '../supabaseClient';
 import { colorFor, formatTime, initialOf, newId, shortTime } from '../lib/utils';
+import ConfirmLeaveModal from './ConfirmLeaveModal';
 
 const MAX_LEN = 2000;
 const GROUP_WINDOW_MS = 5 * 60 * 1000;
@@ -22,6 +23,7 @@ export default function ChatRoom({
   const [loading, setLoading] = useState(true);
   const [draft, setDraft] = useState('');
   const [error, setError] = useState('');
+  const [confirmLeave, setConfirmLeave] = useState(false);
   const scrollRef = useRef(null);
   const stickRef = useRef(true);
 
@@ -128,7 +130,7 @@ export default function ChatRoom({
         <div className="ml-auto flex items-center gap-2">
           <button
             type="button"
-            onClick={onLeave}
+            onClick={() => setConfirmLeave(true)}
             className="flex items-center gap-1.5 rounded bg-discord-red px-3 py-1.5 text-sm font-medium text-white transition hover:bg-red-700"
           >
             <LogOut size={15} /> <span className="hidden sm:inline">Leave Lobby</span>
@@ -219,6 +221,17 @@ export default function ChatRoom({
           </button>
         </div>
       </form>
+      {confirmLeave && (
+        <ConfirmLeaveModal
+          room={room}
+          isLast={memberCount <= 1}
+          onConfirm={() => {
+            setConfirmLeave(false);
+            onLeave();
+          }}
+          onClose={() => setConfirmLeave(false)}
+        />
+      )}
     </section>
   );
 }
