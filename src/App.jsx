@@ -176,7 +176,7 @@ export default function App() {
   const needsName = !username;
 
   return (
-    <div className="flex h-screen overflow-hidden bg-discord-chat font-sans text-discord-text">
+    <div className="flex h-screen h-dvh overflow-hidden bg-discord-chat font-sans text-discord-text">
       <LobbySidebar
         rooms={rooms}
         archivedRooms={archivedRooms}

@@ -201,13 +201,20 @@ export default function ChatRoom({
         })}
       </div>
 
-      <form onSubmit={send} className="shrink-0 px-4 pb-6 pt-1">
+      <form onSubmit={send} className="shrink-0 px-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] pt-1 md:px-4 md:pb-6">
         {error && <p className="mb-2 text-sm text-discord-red">{error}</p>}
         <div className="flex items-center gap-2 rounded-lg bg-discord-input px-4">
           <input
             value={draft}
             maxLength={MAX_LEN}
             onChange={(e) => setDraft(e.target.value)}
+            onFocus={() => {
+              stickRef.current = true;
+              setTimeout(() => {
+                const el = scrollRef.current;
+                if (el) el.scrollTop = el.scrollHeight;
+              }, 300);
+            }}
             placeholder={`Message #${room.name}`}
             className="min-w-0 flex-1 bg-transparent py-3 text-discord-text outline-none placeholder:text-discord-muted"
           />

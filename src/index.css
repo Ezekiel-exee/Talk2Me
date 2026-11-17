@@ -8,6 +8,7 @@ body,
   height: 100%;
   margin: 0;
   background: #1e1f22;
+  overscroll-behavior: none;
 }
 
 ::-webkit-scrollbar {
