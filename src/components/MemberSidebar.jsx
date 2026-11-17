@@ -1,13 +1,22 @@
 import { X } from 'lucide-react';
 import { colorFor, initialOf } from '../lib/utils';
+import { useSwipeToClose } from '../hooks/useSwipeToClose';
 
 export default function MemberSidebar({ members, limit, userId, open, onClose }) {
+  const swipe = useSwipeToClose('right', onClose);
   return (
     <>
-      {open && <div className="fixed inset-0 z-30 bg-black/60 lg:hidden" onClick={onClose} />}
+      <div
+        aria-hidden="true"
+        onClick={onClose}
+        className={`fixed inset-0 z-30 bg-black/60 transition-opacity duration-300 ease-out motion-reduce:transition-none lg:hidden ${
+          open ? 'opacity-100' : 'pointer-events-none opacity-0'
+        }`}
+      />
       <aside
-        className={`fixed inset-y-0 right-0 z-40 flex w-60 flex-col bg-discord-sidebar transition-transform lg:static lg:translate-x-0 ${
-          open ? 'translate-x-0' : 'translate-x-full'
+        {...swipe}
+        className={`fixed inset-y-0 right-0 z-40 flex w-60 transform-gpu flex-col bg-discord-sidebar transition-[transform,visibility,box-shadow] duration-300 ease-[cubic-bezier(0.32,0.72,0,1)] motion-reduce:transition-none lg:visible lg:static lg:translate-x-0 lg:shadow-none ${
+          open ? 'visible translate-x-0 shadow-2xl' : 'invisible translate-x-full shadow-none'
         }`}
       >
         <div className="flex h-12 items-center justify-between border-b border-black/20 px-4 shadow-sm">

@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { Archive, Hash, Lock, MessageCircle, Pencil, Plus, RotateCcw } from 'lucide-react';
 import { colorFor, initialOf } from '../lib/utils';
+import { useSwipeToClose } from '../hooks/useSwipeToClose';
 
 export default function LobbySidebar({
   rooms,
@@ -20,12 +21,20 @@ export default function LobbySidebar({
   onEditName,
 }) {
   const [showArchived, setShowArchived] = useState(false);
+  const swipe = useSwipeToClose('left', onClose);
   return (
     <>
-      {open && <div className="fixed inset-0 z-30 bg-black/60 md:hidden" onClick={onClose} />}
+      <div
+        aria-hidden="true"
+        onClick={onClose}
+        className={`fixed inset-0 z-30 bg-black/60 transition-opacity duration-300 ease-out motion-reduce:transition-none md:hidden ${
+          open ? 'opacity-100' : 'pointer-events-none opacity-0'
+        }`}
+      />
       <aside
-        className={`fixed inset-y-0 left-0 z-40 flex w-[19.5rem] shrink-0 transition-transform md:static md:w-auto md:translate-x-0 ${
-          open ? 'translate-x-0' : '-translate-x-full'
+        {...swipe}
+        className={`fixed inset-y-0 left-0 z-40 flex w-[19.5rem] shrink-0 transform-gpu transition-[transform,visibility,box-shadow] duration-300 ease-[cubic-bezier(0.32,0.72,0,1)] motion-reduce:transition-none md:visible md:static md:w-auto md:translate-x-0 md:shadow-none ${
+          open ? 'visible translate-x-0 shadow-2xl' : 'invisible -translate-x-full shadow-none'
         }`}
       >
         <nav className="flex w-[72px] flex-col items-center gap-2 bg-discord-rail py-3">
