@@ -49,7 +49,7 @@ export default function App() {
   const healingRef = useRef('');
 
   const occupancy = useLobbyPresence({ userId, username, roomId: activeRoom?.id });
-  useRoomHeartbeat(activeRoom?.id);
+  useRoomHeartbeat(activeRoom?.id, userId);
 
   const flash = useCallback((text) => {
     setNotice(text);
@@ -84,7 +84,7 @@ export default function App() {
     const password = verifiedRef.current.get(current.id);
     if (!password || healingRef.current === current.id) return;
     healingRef.current = current.id;
-    supabase.rpc('restore_room', { p_room_id: current.id, p_password: password });
+    supabase.rpc('restore_room', { p_room_id: current.id, p_password: password }).then(() => {}, () => {});
   }, [allRooms, activeRoom]);
 
   const isFull = (room) => (occupancy[room.id] ?? 0) >= room.max_users && room.id !== activeRoom?.id;
@@ -194,6 +194,7 @@ export default function App() {
             username={username}
             systemMessages={systemMessages}
             memberCount={members.length}
+            members={members}
             onLeave={() => setActiveRoom(null)}
             onOpenLobbies={() => setLeftOpen(true)}
             onOpenMembers={() => setRightOpen(true)}

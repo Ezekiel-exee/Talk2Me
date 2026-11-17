@@ -12,6 +12,7 @@ export default function ChatRoom({
   username,
   systemMessages,
   memberCount,
+  members,
   onLeave,
   onOpenLobbies,
   onOpenMembers,
@@ -68,6 +69,13 @@ export default function ChatRoom({
       [...messages, ...systemMessages].sort((a, b) => new Date(a.created_at) - new Date(b.created_at)),
     [messages, systemMessages],
   );
+
+  // Show each author's current name, so renames also apply to earlier messages.
+  const currentNames = useMemo(() => {
+    const map = new Map(members.map((m) => [m.userId, m.username]));
+    map.set(userId, username);
+    return map;
+  }, [members, userId, username]);
 
   useEffect(() => {
     const el = scrollRef.current;
@@ -159,6 +167,7 @@ export default function ChatRoom({
             prev.user_id === item.user_id &&
             new Date(item.created_at) - new Date(prev.created_at) < GROUP_WINDOW_MS;
           const color = colorFor(item.user_id);
+          const author = currentNames.get(item.user_id) ?? item.username;
 
           return grouped ? (
             <div key={item.id} className="group relative flex px-4 py-0.5 hover:bg-black/5">
@@ -173,12 +182,12 @@ export default function ChatRoom({
                 className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full font-bold text-white"
                 style={{ backgroundColor: color }}
               >
-                {initialOf(item.username)}
+                {initialOf(author)}
               </div>
               <div className="ml-4 min-w-0">
                 <div className="flex items-baseline gap-2">
                   <span className="font-medium" style={{ color }}>
-                    {item.username}
+                    {author}
                   </span>
                   <span className="text-xs text-discord-muted">{formatTime(item.created_at)}</span>
                 </div>

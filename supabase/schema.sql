@@ -18,12 +18,15 @@ create table if not exists public.rooms (
 -- messages and settings are kept, and the lobby can be restored with its password.
 alter table public.rooms add column if not exists archived_at timestamptz;
 
--- Heartbeats from clients inside a room; used to detect empty lobbies.
--- Kept in its own table so heartbeats don't spam Realtime on public.rooms.
-create table if not exists public.room_activity (
-  room_id         uuid primary key references public.rooms(id) on delete cascade,
-  last_active_at  timestamptz not null default now()
+-- Who is currently inside each room (refreshed by client heartbeats, removed on leave).
+-- Used to detect empty lobbies. Kept out of Realtime so heartbeats don't spam clients.
+create table if not exists public.room_members (
+  room_id    uuid not null references public.rooms(id) on delete cascade,
+  user_id    text not null,
+  last_seen  timestamptz not null default now(),
+  primary key (room_id, user_id)
 );
+drop table if exists public.room_activity;
 
 -- Password hashes live in a separate table that anon can NEVER read
 -- (RLS enabled + no policies). Access only through the functions below.
@@ -48,7 +51,7 @@ create index if not exists messages_room_created_idx on public.messages (room_id
 -- ---------------------------------------------------------------------------
 alter table public.rooms         enable row level security;
 alter table public.room_secrets  enable row level security;
-alter table public.room_activity enable row level security;
+alter table public.room_members  enable row level security;
 alter table public.messages      enable row level security;
 
 drop policy if exists "rooms are publicly readable"    on public.rooms;
@@ -66,13 +69,13 @@ create policy "anyone can post messages"
   with check (exists (select 1 from public.rooms r where r.id = room_id and r.archived_at is null));
 
 -- No insert/update/delete policies on rooms; rooms are created via create_room().
--- No policies at all on room_secrets / room_activity.
+-- No policies at all on room_secrets / room_members.
 
 -- Explicit table privileges (works even if "Automatically expose new tables" is off).
 grant select on public.rooms to anon, authenticated;
 grant select, insert on public.messages to anon, authenticated;
 revoke all on public.room_secrets from anon, authenticated;
-revoke all on public.room_activity from anon, authenticated;
+revoke all on public.room_members from anon, authenticated;
 
 -- ---------------------------------------------------------------------------
 -- Functions
@@ -103,8 +106,6 @@ begin
   insert into public.room_secrets (room_id, password_hash)
   values (new_room.id, crypt(p_password, gen_salt('bf')));
 
-  insert into public.room_activity (room_id) values (new_room.id);
-
   return new_room;
 end;
 $$;
@@ -123,15 +124,38 @@ as $$
   );
 $$;
 
-create or replace function public.room_heartbeat(p_room_id uuid)
+drop function if exists public.room_heartbeat(uuid);
+
+-- Called every ~15s by each client inside a room.
+create or replace function public.room_heartbeat(p_room_id uuid, p_user_id text)
 returns void
 language sql
 security definer
 set search_path = public, extensions
 as $$
-  insert into public.room_activity (room_id, last_active_at)
-  select r.id, now() from public.rooms r where r.id = p_room_id and r.archived_at is null
-  on conflict (room_id) do update set last_active_at = excluded.last_active_at;
+  insert into public.room_members (room_id, user_id, last_seen)
+  select r.id, p_user_id, now() from public.rooms r where r.id = p_room_id and r.archived_at is null
+  on conflict (room_id, user_id) do update set last_seen = excluded.last_seen;
+$$;
+
+-- Called when a client leaves; archives the lobby right away if nobody is left.
+create or replace function public.leave_room(p_room_id uuid, p_user_id text)
+returns void
+language plpgsql
+security definer
+set search_path = public, extensions
+as $$
+begin
+  delete from public.room_members where room_id = p_room_id and user_id = p_user_id;
+  update public.rooms r
+     set archived_at = now()
+   where r.id = p_room_id
+     and r.archived_at is null
+     and not exists (
+       select 1 from public.room_members m
+       where m.room_id = r.id and m.last_seen > now() - interval '60 seconds'
+     );
+end;
 $$;
 
 -- Restores an archived lobby; requires the room password.
@@ -145,14 +169,13 @@ begin
   if not public.verify_room_password(p_room_id, p_password) then
     return false;
   end if;
-  insert into public.room_activity (room_id, last_active_at) values (p_room_id, now())
-  on conflict (room_id) do update set last_active_at = excluded.last_active_at;
   update public.rooms set archived_at = null where id = p_room_id;
   return true;
 end;
 $$;
 
--- Archives lobbies nobody has pinged for 2.5 minutes. Called by pg_cron, not by clients.
+-- Safety net for crashed tabs / lost connections: archives lobbies with no recent
+-- heartbeat (new lobbies get 60s grace). Called by pg_cron, not by clients.
 create or replace function public.archive_idle_rooms()
 returns int
 language plpgsql
@@ -162,11 +185,15 @@ as $$
 declare
   n int;
 begin
+  delete from public.room_members where last_seen < now() - interval '10 minutes';
   update public.rooms r
      set archived_at = now()
    where r.archived_at is null
-     and coalesce((select a.last_active_at from public.room_activity a where a.room_id = r.id), r.created_at)
-         < now() - interval '150 seconds';
+     and r.created_at < now() - interval '60 seconds'
+     and not exists (
+       select 1 from public.room_members m
+       where m.room_id = r.id and m.last_seen > now() - interval '60 seconds'
+     );
   get diagnostics n = row_count;
   return n;
 end;
@@ -174,19 +201,21 @@ $$;
 
 revoke all on function public.create_room(text, text, int, text) from public;
 revoke all on function public.verify_room_password(uuid, text)  from public;
-revoke all on function public.room_heartbeat(uuid)              from public;
+revoke all on function public.room_heartbeat(uuid, text)        from public;
+revoke all on function public.leave_room(uuid, text)            from public;
 revoke all on function public.restore_room(uuid, text)          from public;
 revoke all on function public.archive_idle_rooms()              from public, anon, authenticated;
 grant execute on function public.create_room(text, text, int, text) to anon, authenticated;
 grant execute on function public.verify_room_password(uuid, text)  to anon, authenticated;
-grant execute on function public.room_heartbeat(uuid)              to anon, authenticated;
+grant execute on function public.room_heartbeat(uuid, text)        to anon, authenticated;
+grant execute on function public.leave_room(uuid, text)            to anon, authenticated;
 grant execute on function public.restore_room(uuid, text)          to anon, authenticated;
 
 -- ---------------------------------------------------------------------------
--- Scheduled archiving (pg_cron, every minute)
+-- Scheduled safety net (pg_cron, every 30 seconds)
 -- ---------------------------------------------------------------------------
 create extension if not exists pg_cron with schema pg_catalog;
-select cron.schedule('archive-idle-rooms', '* * * * *', 'select public.archive_idle_rooms()');
+select cron.schedule('archive-idle-rooms', '30 seconds', 'select public.archive_idle_rooms()');
 
 -- ---------------------------------------------------------------------------
 -- Realtime replication (postgres_changes)

@@ -7,6 +7,9 @@ export const isSupabaseConfigured = Boolean(
   url && anonKey && /^https?:\/\//.test(url) && !url.includes('your-project-ref'),
 );
 
+export const supabaseUrl = url;
+export const supabaseKey = anonKey;
+
 export const supabase = createClient(
   isSupabaseConfigured ? url : 'https://placeholder.supabase.co',
   isSupabaseConfigured ? anonKey : 'placeholder-key',
