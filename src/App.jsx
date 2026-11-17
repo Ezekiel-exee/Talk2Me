@@ -4,6 +4,7 @@ import { isSupabaseConfigured, supabase } from './supabaseClient';
 import { useIdentity } from './hooks/useIdentity';
 import { useRooms } from './hooks/useRooms';
 import { useLobbyPresence } from './hooks/useLobbyPresence';
+import { useVisualViewportHeight } from './hooks/useVisualViewportHeight';
 import LobbySidebar from './components/LobbySidebar';
 import RoomView from './components/RoomView';
 import CreateRoomModal from './components/CreateRoomModal';
@@ -29,6 +30,7 @@ VITE_SUPABASE_ANON_KEY=your-anon-key`}
 }
 
 export default function App() {
+  useVisualViewportHeight();
   const { userId, username, setUsername } = useIdentity();
   const { rooms: allRooms, setRooms, loading, error } = useRooms();
   const rooms = allRooms.filter((r) => !r.archived_at);
@@ -176,7 +178,10 @@ export default function App() {
   const needsName = !username;
 
   return (
-    <div className="flex h-screen h-dvh overflow-hidden bg-discord-chat font-sans text-discord-text">
+    <div
+      className="fixed inset-x-0 top-0 flex overflow-hidden bg-discord-chat font-sans text-discord-text"
+      style={{ height: 'var(--app-height, 100dvh)' }}
+    >
       <LobbySidebar
         rooms={rooms}
         archivedRooms={archivedRooms}
