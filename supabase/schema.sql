@@ -212,6 +212,139 @@ grant execute on function public.leave_room(uuid, text)            to anon, auth
 grant execute on function public.restore_room(uuid, text)          to anon, authenticated;
 
 -- ---------------------------------------------------------------------------
+-- Replies, edits and reactions
+-- ---------------------------------------------------------------------------
+alter table public.messages add column if not exists reply_to uuid references public.messages(id) on delete set null;
+alter table public.messages add column if not exists edited_at timestamptz;
+
+-- Each browser holds a random secret; the first write claims a user id for that
+-- secret (only its hash is stored). Edits and reactions require the matching secret.
+create table if not exists public.user_keys (
+  user_id   text primary key,
+  key_hash  text not null
+);
+alter table public.user_keys enable row level security;
+revoke all on public.user_keys from anon, authenticated;
+
+create table if not exists public.message_reactions (
+  message_id  uuid not null references public.messages(id) on delete cascade,
+  room_id     uuid not null references public.rooms(id) on delete cascade,
+  user_id     text not null,
+  emoji       text not null check (char_length(emoji) between 1 and 16),
+  created_at  timestamptz not null default now(),
+  primary key (message_id, user_id, emoji)
+);
+create index if not exists message_reactions_room_idx on public.message_reactions (room_id);
+alter table public.message_reactions enable row level security;
+alter table public.message_reactions replica identity full;
+
+drop policy if exists "reactions are publicly readable" on public.message_reactions;
+create policy "reactions are publicly readable"
+  on public.message_reactions for select to anon, authenticated using (true);
+grant select on public.message_reactions to anon, authenticated;
+revoke insert, update, delete on public.message_reactions from anon, authenticated;
+
+create or replace function public.check_user(p_user_id text, p_secret text, p_claim boolean)
+returns void
+language plpgsql
+security definer
+set search_path = public, extensions
+as $$
+declare
+  h text;
+  stored text;
+begin
+  if p_user_id is null or char_length(p_user_id) not between 1 and 64
+     or p_secret is null or char_length(p_secret) < 16 then
+    raise exception 'unauthorized';
+  end if;
+  h := encode(digest(p_secret, 'sha256'), 'hex');
+  select key_hash into stored from public.user_keys where user_id = p_user_id;
+  if stored is null then
+    if not p_claim then raise exception 'unauthorized'; end if;
+    insert into public.user_keys (user_id, key_hash) values (p_user_id, h) on conflict (user_id) do nothing;
+    select key_hash into stored from public.user_keys where user_id = p_user_id;
+  end if;
+  if stored <> h then raise exception 'unauthorized'; end if;
+end;
+$$;
+
+create or replace function public.send_message(
+  p_id uuid, p_room_id uuid, p_user_id text, p_secret text,
+  p_username text, p_content text, p_reply_to uuid default null)
+returns void
+language plpgsql
+security definer
+set search_path = public, extensions
+as $$
+begin
+  perform public.check_user(p_user_id, p_secret, true);
+  if not exists (select 1 from public.rooms r where r.id = p_room_id and r.archived_at is null) then
+    raise exception 'This lobby is archived or no longer exists';
+  end if;
+  if p_reply_to is not null
+     and not exists (select 1 from public.messages m where m.id = p_reply_to and m.room_id = p_room_id) then
+    p_reply_to := null;
+  end if;
+  insert into public.messages (id, room_id, user_id, username, content, reply_to)
+  values (p_id, p_room_id, p_user_id, p_username, p_content, p_reply_to);
+end;
+$$;
+
+create or replace function public.edit_message(p_id uuid, p_user_id text, p_secret text, p_content text)
+returns void
+language plpgsql
+security definer
+set search_path = public, extensions
+as $$
+begin
+  perform public.check_user(p_user_id, p_secret, false);
+  update public.messages set content = p_content, edited_at = now()
+   where id = p_id and user_id = p_user_id;
+  if not found then
+    raise exception 'You can only edit your own messages';
+  end if;
+end;
+$$;
+
+-- Adds the reaction, or removes it if this user already reacted with the same emoji.
+create or replace function public.toggle_reaction(p_message_id uuid, p_user_id text, p_secret text, p_emoji text)
+returns void
+language plpgsql
+security definer
+set search_path = public, extensions
+as $$
+declare
+  rid uuid;
+begin
+  perform public.check_user(p_user_id, p_secret, true);
+  if p_emoji is null or char_length(p_emoji) not between 1 and 16 then
+    raise exception 'Invalid emoji';
+  end if;
+  select room_id into rid from public.messages where id = p_message_id;
+  if rid is null then raise exception 'Message not found'; end if;
+
+  delete from public.message_reactions
+   where message_id = p_message_id and user_id = p_user_id and emoji = p_emoji;
+  if not found then
+    if (select count(distinct emoji) from public.message_reactions where message_id = p_message_id) >= 20 then
+      raise exception 'Too many different reactions on this message';
+    end if;
+    insert into public.message_reactions (message_id, room_id, user_id, emoji)
+    values (p_message_id, rid, p_user_id, p_emoji);
+  end if;
+end;
+$$;
+
+revoke all on function public.check_user(text, text, boolean) from public, anon, authenticated;
+revoke all on function public.send_message(uuid, uuid, text, text, text, text, uuid) from public;
+revoke all on function public.edit_message(uuid, text, text, text) from public;
+revoke all on function public.toggle_reaction(uuid, text, text, text) from public;
+grant execute on function public.send_message(uuid, uuid, text, text, text, text, uuid) to anon, authenticated;
+grant execute on function public.edit_message(uuid, text, text, text) to anon, authenticated;
+grant execute on function public.toggle_reaction(uuid, text, text, text) to anon, authenticated;
+
+-- ---------------------------------------------------------------------------
 -- Scheduled safety net (pg_cron, every 30 seconds)
 -- ---------------------------------------------------------------------------
 create extension if not exists pg_cron with schema pg_catalog;
@@ -227,6 +360,9 @@ begin
   end if;
   if not exists (select 1 from pg_publication_tables where pubname = 'supabase_realtime' and schemaname = 'public' and tablename = 'rooms') then
     alter publication supabase_realtime add table public.rooms;
+  end if;
+  if not exists (select 1 from pg_publication_tables where pubname = 'supabase_realtime' and schemaname = 'public' and tablename = 'message_reactions') then
+    alter publication supabase_realtime add table public.message_reactions;
   end if;
 end
 $$;

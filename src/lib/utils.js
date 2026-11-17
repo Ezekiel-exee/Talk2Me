@@ -31,3 +31,17 @@ export function shortTime(iso) {
 export function newId() {
   return crypto.randomUUID();
 }
+
+let cachedSecret = null;
+
+// Private per-browser secret proving ownership of this user id for edits/reactions.
+export function getUserSecret() {
+  if (!cachedSecret) {
+    cachedSecret = localStorage.getItem('talk2me.secret');
+    if (!cachedSecret) {
+      cachedSecret = `${newId()}${newId()}`;
+      localStorage.setItem('talk2me.secret', cachedSecret);
+    }
+  }
+  return cachedSecret;
+}
