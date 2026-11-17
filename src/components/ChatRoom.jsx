@@ -11,7 +11,7 @@ const MAX_INPUT_PX = 120;
 const GROUP_WINDOW_MS = 5 * 60 * 1000;
 const TYPING_REFRESH_MS = 2500;
 const TYPING_IDLE_MS = 3000;
-const MESSAGE_COLUMNS = 'id, room_id, user_id, username, content, created_at, reply_to, edited_at';
+const MESSAGE_COLUMNS = 'id, room_id, user_id, username, content, created_at, reply_to, edited_at, kind';
 
 const reactionKey = (r) => `${r.message_id}|${r.user_id}|${r.emoji}`;
 const oneLine = (text, max = 100) => text.replace(/\s+/g, ' ').trim().slice(0, max);
@@ -69,7 +69,6 @@ export default function ChatRoom({
   userId,
   username,
   visible = true,
-  systemMessages,
   memberCount,
   members,
   typingNames = [],
@@ -194,11 +193,9 @@ export default function ChatRoom({
       });
   }, [messages, messagesById]);
 
-  const items = useMemo(
-    () =>
-      [...messages, ...systemMessages].sort((a, b) => new Date(a.created_at) - new Date(b.created_at)),
-    [messages, systemMessages],
-  );
+  // Join/leave notices are stored as 'system' messages; everything else uses chatMessages.
+  const chatMessages = useMemo(() => messages.filter((m) => m.kind !== 'system'), [messages]);
+  const items = messages;
 
   // Current display name for each user: live presence name first, else the name on their messages.
   const currentNames = useMemo(() => {
@@ -238,7 +235,7 @@ export default function ChatRoom({
     if (el && stickRef.current) el.scrollTop = el.scrollHeight;
   }, [items, visible, reactions]);
 
-  latestIdRef.current = messages[messages.length - 1]?.id ?? null;
+  latestIdRef.current = chatMessages[chatMessages.length - 1]?.id ?? null;
 
   // A message counts as seen once this lobby is on screen, the tab is in the
   // foreground and the newest message is in view.
@@ -267,14 +264,14 @@ export default function ChatRoom({
     const byMessage = new Map();
     members.forEach((m) => {
       if (m.userId === userId || !m.seenId) return;
-      let idx = messages.findIndex((x) => x.id === m.seenId);
-      while (idx >= 0 && messages[idx].user_id === m.userId) idx -= 1;
+      let idx = chatMessages.findIndex((x) => x.id === m.seenId);
+      while (idx >= 0 && chatMessages[idx].user_id === m.userId) idx -= 1;
       if (idx < 0) return;
-      const id = messages[idx].id;
+      const id = chatMessages[idx].id;
       byMessage.set(id, [...(byMessage.get(id) ?? []), m]);
     });
     return byMessage;
-  }, [members, messages, userId]);
+  }, [members, chatMessages, userId]);
 
   const onScroll = () => {
     const el = scrollRef.current;
@@ -414,7 +411,7 @@ export default function ChatRoom({
       return;
     }
     if (e.key === 'ArrowUp' && !draft) {
-      const last = [...messages].reverse().find((m) => m.user_id === userId);
+      const last = [...chatMessages].reverse().find((m) => m.user_id === userId);
       if (last) {
         e.preventDefault();
         startEdit(last);
@@ -465,11 +462,17 @@ export default function ChatRoom({
         {loading && <p className="px-4 text-sm text-discord-muted">Loading messages...</p>}
 
         {items.map((item, i) => {
-          if (item.type === 'system') {
+          if (item.kind === 'system') {
+            const joined = item.content.startsWith('joined');
             return (
               <div key={item.id} className="flex items-center gap-2 px-4 py-1 text-sm text-discord-muted">
-                <span className="text-discord-green">→</span>
-                <span>{item.text}</span>
+                <span className={joined ? 'text-discord-green' : 'text-discord-red'}>{joined ? '→' : '←'}</span>
+                <span>
+                  <span className="font-semibold text-discord-text">
+                    {currentNames.get(item.user_id) ?? item.username}
+                  </span>{' '}
+                  {item.content}
+                </span>
                 <span className="text-xs">{shortTime(item.created_at)}</span>
               </div>
             );
@@ -477,7 +480,7 @@ export default function ChatRoom({
           const prev = items[i - 1];
           const grouped =
             prev &&
-            prev.type !== 'system' &&
+            prev.kind !== 'system' &&
             !item.reply_to &&
             prev.user_id === item.user_id &&
             new Date(item.created_at) - new Date(prev.created_at) < GROUP_WINDOW_MS;

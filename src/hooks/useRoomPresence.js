@@ -1,15 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { supabase } from '../supabaseClient';
-import { newId } from '../lib/utils';
 
 const TYPING_TTL_MS = 5000;
 
-// Per-room realtime channel: presence drives the member sidebar, join/leave
-// notices, the user limit (earliest joiners keep their seat) and read receipts;
-// broadcast drives the typing indicator.
+// Per-room realtime channel: presence drives the member sidebar, the user limit
+// (earliest joiners keep their seat) and read receipts; broadcast drives the typing
+// indicator. Join/leave notices are persisted by the server (see room_heartbeat).
 export function useRoomPresence({ room, userId, username, onRoomFull }) {
   const [members, setMembers] = useState([]);
-  const [systemMessages, setSystemMessages] = useState([]);
   const [typing, setTyping] = useState({});
   const channelRef = useRef(null);
   const joinedAtRef = useRef(0);
@@ -36,7 +34,6 @@ export function useRoomPresence({ room, userId, username, onRoomFull }) {
 
   useEffect(() => {
     setMembers([]);
-    setSystemMessages([]);
     setTyping({});
     readyRef.current = false;
     seenRef.current = null;
@@ -51,12 +48,6 @@ export function useRoomPresence({ room, userId, username, onRoomFull }) {
       config: { presence: { key: userId }, broadcast: { self: false } },
     });
     channelRef.current = channel;
-
-    const pushSystem = (text) =>
-      setSystemMessages((prev) => [
-        ...prev,
-        { id: newId(), type: 'system', text, created_at: new Date().toISOString() },
-      ]);
 
     const clearTyping = (id) => {
       clearTimeout(timers.get(id));
@@ -90,15 +81,10 @@ export function useRoomPresence({ room, userId, username, onRoomFull }) {
         if (myIndex >= 0) synced = true;
         setMembers(list);
       })
-      .on('presence', { event: 'join' }, ({ key, newPresences, currentPresences }) => {
-        if (!synced || kicked || key === userId || currentPresences.length > 0) return;
-        pushSystem(`${newPresences[0]?.username ?? 'Someone'} joined the lobby`);
-      })
-      .on('presence', { event: 'leave' }, ({ key, leftPresences }) => {
+      .on('presence', { event: 'leave' }, ({ key }) => {
         if (!synced || kicked || key === userId) return;
         if ((channel.presenceState()[key] ?? []).length > 0) return;
         clearTyping(key);
-        pushSystem(`${leftPresences[0]?.username ?? 'Someone'} left the lobby`);
       })
       .on('broadcast', { event: 'typing' }, ({ payload }) => {
         if (!payload?.userId || payload.userId === userId) return;
@@ -157,5 +143,5 @@ export function useRoomPresence({ room, userId, username, onRoomFull }) {
     .filter(([id]) => members.some((m) => m.userId === id))
     .map(([id, name]) => members.find((m) => m.userId === id)?.username ?? name);
 
-  return { members, systemMessages, typingNames, markSeen, sendTyping };
+  return { members, typingNames, markSeen, sendTyping };
 }

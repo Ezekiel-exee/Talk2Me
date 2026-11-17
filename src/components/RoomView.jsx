@@ -1,4 +1,4 @@
-import { useCallback } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import ChatRoom from './ChatRoom';
 import MemberSidebar from './MemberSidebar';
 import { useRoomPresence } from '../hooks/useRoomPresence';
@@ -19,13 +19,20 @@ export default function RoomView({
   onOpenMembers,
 }) {
   const handleFull = useCallback(() => onRoomFull(room), [onRoomFull, room]);
-  const { members, systemMessages, typingNames, markSeen, sendTyping } = useRoomPresence({
+  const { members, typingNames, markSeen, sendTyping } = useRoomPresence({
     room,
     userId,
     username,
     onRoomFull: handleFull,
   });
-  useRoomHeartbeat(room.id, userId);
+
+  // Only start reporting to the server once presence has given us a seat, so a
+  // rejected join to a full lobby never posts "joined"/"left" notices.
+  const [seated, setSeated] = useState(false);
+  useEffect(() => {
+    if (members.some((m) => m.userId === userId)) setSeated(true);
+  }, [members, userId]);
+  useRoomHeartbeat(room.id, userId, username, seated);
 
   return (
     <div className={visible ? 'contents' : 'hidden'}>
@@ -34,7 +41,6 @@ export default function RoomView({
         visible={visible}
         userId={userId}
         username={username}
-        systemMessages={systemMessages}
         memberCount={members.length}
         members={members}
         typingNames={typingNames}
