@@ -1,10 +1,11 @@
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Hash, Lock, LogOut, Menu, SendHorizontal, Users } from 'lucide-react';
 import { supabase } from '../supabaseClient';
 import { colorFor, formatTime, initialOf, newId, shortTime } from '../lib/utils';
 import ConfirmLeaveModal from './ConfirmLeaveModal';
 
 const MAX_LEN = 2000;
+const MAX_INPUT_PX = 120;
 const GROUP_WINDOW_MS = 5 * 60 * 1000;
 const TYPING_REFRESH_MS = 2500;
 const TYPING_IDLE_MS = 3000;
@@ -77,6 +78,7 @@ export default function ChatRoom({
   const [draft, setDraft] = useState('');
   const [error, setError] = useState('');
   const [confirmLeave, setConfirmLeave] = useState(false);
+  const inputRef = useRef(null);
   const scrollRef = useRef(null);
   const stickRef = useRef(true);
   const latestIdRef = useRef(null);
@@ -195,6 +197,25 @@ export default function ChatRoom({
   };
 
   useEffect(() => () => clearTimeout(typingIdle.current), []);
+
+  // Grow with the text up to 4 lines (24px each + 24px padding), then scroll inside.
+  useLayoutEffect(() => {
+    const el = inputRef.current;
+    if (!el) return;
+    el.style.height = 'auto';
+    el.style.height = `${Math.min(el.scrollHeight, MAX_INPUT_PX)}px`;
+    el.style.overflowY = el.scrollHeight > MAX_INPUT_PX ? 'auto' : 'hidden';
+    const list = scrollRef.current;
+    if (list && stickRef.current) list.scrollTop = list.scrollHeight;
+  }, [draft, visible]);
+
+  // Enter sends, Shift+Enter adds a line. On touch screens Enter adds a line (use the send button).
+  const handleKeyDown = (e) => {
+    if (e.key !== 'Enter' || e.shiftKey || e.nativeEvent.isComposing) return;
+    if (window.matchMedia('(pointer: coarse)').matches) return;
+    e.preventDefault();
+    e.currentTarget.form.requestSubmit();
+  };
 
   const handleChange = (e) => {
     const value = e.target.value;
@@ -333,11 +354,14 @@ export default function ChatRoom({
       <form onSubmit={send} className="shrink-0 px-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] pt-1 md:px-4 md:pb-6">
         <TypingIndicator names={typingNames} />
         {error && <p className="mb-2 text-sm text-discord-red">{error}</p>}
-        <div className="flex items-center gap-2 rounded-lg bg-discord-input px-4">
-          <input
+        <div className="flex items-end gap-2 rounded-lg bg-discord-input px-4">
+          <textarea
+            ref={inputRef}
+            rows={1}
             value={draft}
             maxLength={MAX_LEN}
             onChange={handleChange}
+            onKeyDown={handleKeyDown}
             onFocus={() => {
               stickRef.current = true;
               setTimeout(() => {
@@ -346,13 +370,13 @@ export default function ChatRoom({
               }, 300);
             }}
             placeholder={`Message #${room.name}`}
-            className="min-w-0 flex-1 bg-transparent py-3 text-discord-text outline-none placeholder:text-discord-muted"
+            className="min-w-0 flex-1 resize-none bg-transparent py-3 leading-6 text-discord-text outline-none placeholder:text-discord-muted"
           />
           <button
             type="submit"
             disabled={!draft.trim()}
             aria-label="Send"
-            className="text-discord-muted transition hover:text-discord-blurple disabled:opacity-40 disabled:hover:text-discord-muted"
+            className="mb-3 text-discord-muted transition hover:text-discord-blurple disabled:opacity-40 disabled:hover:text-discord-muted"
           >
             <SendHorizontal size={20} />
           </button>
